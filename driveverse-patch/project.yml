@@ -1,0 +1,113 @@
+name: DriveVerse
+options:
+  bundleIdPrefix: io.github.mels
+  developmentLanguage: en
+  deploymentTarget:
+    iOS: "26.0"
+  createIntermediateGroups: true
+
+# Marks the project as already upgraded so Xcode stops offering its
+# "update to recommended settings" dialog (whose direct pbxproj edits a
+# regeneration would wipe anyway).
+attributes:
+  LastUpgradeCheck: "2660"
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    CODE_SIGN_STYLE: Automatic
+    MARKETING_VERSION: "1.0.0"
+    CURRENT_PROJECT_VERSION: "1"
+    # Native iPhone and iPad support.
+    TARGETED_DEVICE_FAMILY: "1,2"
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    STRING_CATALOG_GENERATE_SYMBOLS: YES
+
+targets:
+  DriveVerse:
+    type: application
+    platform: iOS
+    sources:
+      - path: DriveVerse
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.mels.driveverse
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+    info:
+      path: DriveVerse/Resources/Info.plist
+      properties:
+        CFBundleDisplayName: DriveVerse
+        NSSupportsLiveActivities: true
+        # Makes the Lyrics folder visible in the Files app.
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        # Lyric lines change every few seconds — without the frequent-updates
+        # budget, ActivityKit silently stops rendering updates ~30 s after
+        # the app backgrounds while Activity.update keeps getting called.
+        NSSupportsLiveActivitiesFrequentUpdates: true
+        NSAppleMusicUsageDescription: DriveVerse reads the current Apple Music track to fetch and display synced lyrics. It never plays or modifies your music.
+        # location (not audio): iOS forbids Live Activity updates from apps
+        # whose only background reason is playing media.
+        UIBackgroundModes: [location]
+        NSLocationWhenInUseUsageDescription: Drive Mode uses a low-power location session to stay active in the background so lyrics keep updating on CarPlay and the lock screen. Positions are discarded immediately and never leave the device.
+        NSLocationAlwaysAndWhenInUseUsageDescription: Allowing "Always" lets the CarPlay automation start Drive Mode automatically when you get in the car. Positions are discarded immediately and never leave the device.
+        UILaunchScreen: {}
+        # iPhone stays portrait-only; iPad supports every orientation.
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        ITSAppUsesNonExemptEncryption: false
+    dependencies:
+      - target: DriveVerseWidgets
+        embed: true
+
+  DriveVerseWidgets:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: DriveVerseWidgets
+      - path: DriveVerse/LiveActivity/LyricsAttributes.swift
+      - path: DriveVerse/LiveActivity/LiveLyricsFillLayout.swift
+      - path: DriveVerse/LiveActivity/LiveLyricsTailAnimation.swift
+      - path: DriveVerse/LiveActivity/LiveLyricsParticleLayout.swift
+      - path: DriveVerse/LiveActivity/LiveLyricsParticleMorph.swift
+      - path: DriveVerse/LiveActivity/PlaybackIntents.swift
+      - path: DriveVerse/Resources/Localizable.xcstrings
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.mels.driveverse.widgets
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) WIDGET_EXTENSION"
+    info:
+      path: DriveVerseWidgets/Info.plist
+      properties:
+        CFBundleDisplayName: DriveVerse Lyrics
+        NSSupportsLiveActivitiesFrequentUpdates: true
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+
+  DriveVerseTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: DriveVerseTests
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: true
+    dependencies:
+      - target: DriveVerse
+
+schemes:
+  DriveVerse:
+    build:
+      targets:
+        DriveVerse: all
+    run:
+      config: Debug
+    test:
+      targets:
+        - DriveVerseTests
