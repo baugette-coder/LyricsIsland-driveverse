@@ -1,0 +1,553 @@
+import Foundation
+import Combine
+import os
+#if canImport(ActivityKit)
+import ActivityKit
+#endif
+
+enum LyricsDisplayState: Equatable {
+    case idle       // nothing playing yet
+    case loading
+    case synced(LyricsDocument)
+    case plain(LyricsDocument)
+    case instrumental
+    case notFound
+    case failed
+}
+
+/// Central wiring: Apple Music → sync engine → lyrics → UI and Live Activity.
+@MainActor
+final class AppModel: ObservableObject {
+    /// Single shared instance: the SwiftUI scene and the Drive Mode App
+    /// Intents (which can launch the process in the background) must drive
+    /// the same pipeline.
+    static let shared = AppModel()
+
+    private static let log = Logger(subsystem: "io.github.mels.driveverse", category: "pipeline")
+    private static let displayModeKey = "lyricsDisplayMode"
+    private static let chineseConversionKey = "lyricsChineseConversion"
+    private static let timingOffsetKey = "lyricsTimingOffsetMs"
+    private static let lyricsFontScaleKey = "lyricsFontScale"
+    private static let lyricsLineSpacingKey = "lyricsLineSpacing"
+    private static let lyricsEnabledKey = "lyricsEnabled"
+    private static let liveActivityWordUpdatesKey = "liveActivityWordUpdatesEnabled"
+    private static let liveActivityLineEffectKey = "liveActivityLineEffect"
+    private static let liveActivityWordEffectKey = "liveActivityWordEffect"
+
+    // MARK: UI state
+
+    @Published private(set) var nowPlaying: NowPlayingState?
+    @Published private(set) var lyricsState: LyricsDisplayState = .idle
+    @Published private(set) var currentLyricsSource: LyricsSource?
+    @Published private(set) var lyricsCandidates: [LyricsCandidateChoice] = []
+    @Published private(set) var selectedLyricsCandidateID: String?
+    @Published private(set) var isUsingManualLyrics = false
+    @Published private(set) var position: LyricsPosition?
+    @Published private(set) var appleMusicAuth: MediaAuthStatus = .unknown
+    @Published var errorMessage: String?
+    @Published var lyricsEnabled: Bool {
+        didSet {
+            defaults.set(lyricsEnabled, forKey: Self.lyricsEnabledKey)
+            if lyricsEnabled {
+#if os(iOS)
+                liveActivity.holdWhilePaused = driveMode
+#endif
+                currentSignature = nil
+                if let state = nowPlaying { fetchLyrics(for: state) }
+                syncLiveActivity()
+            } else {
+                disableLyrics()
+            }
+        }
+    }
+    @Published var liveActivityWordUpdatesEnabled: Bool {
+        didSet {
+            defaults.set(liveActivityWordUpdatesEnabled, forKey: Self.liveActivityWordUpdatesKey)
+#if os(iOS)
+            liveActivity.wordUpdatesEnabled = liveActivityWordUpdatesEnabled
+            syncEngine.setLiveActivityLineLeadMs(liveActivityLineLeadMs)
+            syncLiveActivity()
+#endif
+        }
+    }
+    @Published var liveActivityWordEffect: LiveLyricsWordEffect {
+        didSet {
+            defaults.set(liveActivityWordEffect.rawValue, forKey: Self.liveActivityWordEffectKey)
+#if os(iOS)
+            liveActivity.wordEffect = liveActivityWordEffect
+            syncLiveActivity()
+#endif
+        }
+    }
+    @Published var liveActivityLineEffect: LiveLyricsLineEffect {
+        didSet {
+            defaults.set(liveActivityLineEffect.rawValue, forKey: Self.liveActivityLineEffectKey)
+#if os(iOS)
+            liveActivity.lineEffect = liveActivityLineEffect
+            syncEngine.setLiveActivityLineLeadMs(liveActivityLineLeadMs)
+            syncLiveActivity()
+#endif
+        }
+    }
+    @Published var lyricsDisplayMode: LyricsDisplayMode {
+        didSet {
+            defaults.set(lyricsDisplayMode.rawValue, forKey: Self.displayModeKey)
+            refreshLyricsPresentation()
+            if LyricsSecondaryRequirement(displayMode: oldValue)
+                != LyricsSecondaryRequirement(displayMode: lyricsDisplayMode),
+               let state = nowPlaying {
+                fetchLyrics(for: state)
+            }
+        }
+    }
+    @Published var chineseConversion: ChineseConversion {
+        didSet {
+            defaults.set(chineseConversion.rawValue, forKey: Self.chineseConversionKey)
+            refreshLyricsPresentation()
+        }
+    }
+    @Published var lyricsTimingOffsetMs: Int {
+        didSet {
+            defaults.set(lyricsTimingOffsetMs, forKey: Self.timingOffsetKey)
+            syncEngine.setOffsetMs(lyricsTimingOffsetMs)
+        }
+    }
+    /// Presentation-only controls for the immersive lyrics screen. Keeping
+    /// these here makes the values follow the user across launches without
+    /// changing the cached lyric document or Live Activity rendering.
+    @Published var lyricsFontScale: Double {
+        didSet {
+            defaults.set(lyricsFontScale, forKey: Self.lyricsFontScaleKey)
+        }
+    }
+    @Published var lyricsLineSpacing: Double {
+        didSet {
+            defaults.set(lyricsLineSpacing, forKey: Self.lyricsLineSpacingKey)
+        }
+    }
+    @Published var driveMode = false {
+        didSet {
+#if os(iOS)
+            liveActivity.holdWhilePaused = driveMode && lyricsEnabled
+#if canImport(ActivityKit)
+            // Surface the system's frequent-update preference. ActivityKit
+            // still controls rendering cadence, and Apple documents this
+            // preference primarily for ActivityKit push notifications.
+            if driveMode, lyricsEnabled, !ActivityAuthorizationInfo().frequentPushesEnabled {
+                errorMessage = String(localized: "For smooth lyrics, turn on Settings → DriveVerse → Live Activities → More Frequent Updates.")
+            }
+#endif
+#endif
+            syncLiveActivity()
+        }
+    }
+
+    // MARK: Pipeline
+
+#if os(iOS)
+    private let appleSource: AppleMusicSource
+    private let liveActivity = LiveActivityController()
+    private let backgroundKeeper = BackgroundKeeper()
+#endif
+    private let syncEngine = SyncEngine()
+    private let lyricsService = LyricsService()
+    private let defaults: UserDefaults
+
+    private var cancellables: Set<AnyCancellable> = []
+    private var lyricsTask: Task<Void, Never>?
+    private var currentSignature: String?
+    private var started = false
+
+    var lyricsDisplayOptions: LyricsDisplayOptions {
+        LyricsDisplayOptions(
+            mode: lyricsDisplayMode,
+            chineseConversion: chineseConversion
+        )
+    }
+
+    var playbackAnchor: NowPlayingState? { syncEngine.anchor }
+
+    private var liveActivityLineLeadMs: Int {
+        LiveLyricsAnimationTiming.lineTriggerLeadMs(
+            wordUpdatesEnabled: liveActivityWordUpdatesEnabled,
+            lineEffect: liveActivityLineEffect
+        )
+    }
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        lyricsEnabled = defaults.object(forKey: Self.lyricsEnabledKey) as? Bool ?? true
+        liveActivityWordUpdatesEnabled = defaults.object(
+            forKey: Self.liveActivityWordUpdatesKey
+        ) as? Bool ?? true
+        liveActivityLineEffect = defaults.string(forKey: Self.liveActivityLineEffectKey)
+            .flatMap(LiveLyricsLineEffect.init(rawValue:)) ?? .original
+        liveActivityWordEffect = defaults.string(forKey: Self.liveActivityWordEffectKey)
+            .flatMap(LiveLyricsWordEffect.init(rawValue:)) ?? .fill
+        lyricsDisplayMode = defaults.string(forKey: Self.displayModeKey)
+            .flatMap(LyricsDisplayMode.init(rawValue:)) ?? .originalAndTranslation
+        chineseConversion = defaults.string(forKey: Self.chineseConversionKey)
+            .flatMap(ChineseConversion.init(rawValue:)) ?? .preserve
+        lyricsTimingOffsetMs = min(5_000, max(-5_000, defaults.integer(forKey: Self.timingOffsetKey)))
+        lyricsFontScale = min(1.35, max(
+            0.80,
+            defaults.object(forKey: Self.lyricsFontScaleKey) as? Double ?? 1
+        ))
+        lyricsLineSpacing = min(34, max(
+            10,
+            defaults.object(forKey: Self.lyricsLineSpacingKey) as? Double ?? 26
+        ))
+
+        let applePublisher: AnyPublisher<NowPlayingState?, Never>
+#if os(iOS)
+        let apple = AppleMusicSource()
+        appleSource = apple
+        applePublisher = apple.statePublisher
+#else
+        applePublisher = Just<NowPlayingState?>(nil).eraseToAnyPublisher()
+#endif
+
+        syncEngine.setDisplayOptions(lyricsDisplayOptions)
+        syncEngine.setOffsetMs(lyricsTimingOffsetMs)
+        syncEngine.setLiveActivityLineLeadMs(liveActivityLineLeadMs)
+#if os(iOS)
+        // DriveVerse's own player wins unless it is paused while Apple Music
+        // is playing something else.
+        let combined = Publishers.CombineLatest(
+            applePublisher.prepend(Optional<NowPlayingState>.none),
+            PlayerController.shared.statePublisher
+        )
+        .map { apple, mine -> NowPlayingState? in
+            guard let mine else { return apple }
+            if !mine.isPlaying, apple?.isPlaying == true { return apple }
+            return mine
+        }
+        .eraseToAnyPublisher()
+        wire(nowPlayingPublisher: combined)
+
+        // Joining a car (CarPlay) audio route starts Drive Mode so the lyrics
+        // tile appears on its own; leaving the car ends it.
+        PlayerController.shared.onCarAudioChange = { [weak self] connected in
+            let enabled = UserDefaults.standard.object(forKey: Self.autoDriveOnCarKey) as? Bool ?? true
+            guard enabled else { return }
+            if connected { self?.startDriveSession() } else { self?.stopDriveSession() }
+        }
+#else
+        wire(nowPlayingPublisher: applePublisher)
+#endif
+
+#if os(iOS)
+        liveActivity.wordUpdatesEnabled = liveActivityWordUpdatesEnabled
+        liveActivity.wordEffect = liveActivityWordEffect
+        liveActivity.lineEffect = liveActivityLineEffect
+        backgroundKeeper.onIssue = { [weak self] message in
+            Task { @MainActor in
+                self?.errorMessage = message
+                self?.driveMode = false
+            }
+        }
+#endif
+    }
+
+    func start() {
+        guard !started else { return }
+        started = true
+#if os(iOS)
+        appleSource.start()
+#endif
+        syncEngine.startTicking()
+    }
+
+    /// Called when the scene returns to .active: any background stretch may
+    /// have left the lyric index stale (missed notifications, old anchors),
+    /// so force a fresh Apple Music read; the sync engine's seek
+    /// detection snaps the line immediately.
+    func foregroundResync() {
+        guard started else { return }
+#if os(iOS)
+        appleSource.refresh()
+#endif
+    }
+
+    /// Entry point for the Start Drive Mode intent. May run with the app
+    /// launched straight into the background, where the LiveActivityIntent
+    /// grant is the only legal way to request an activity — so one is started
+    /// immediately (a placeholder until music plays); everything after that
+    /// is a plain background update.
+    func startDriveSession() {
+#if os(iOS)
+        start()
+        driveMode = true
+        if lyricsEnabled {
+            liveActivity.beginSession(state: nowPlaying,
+                                      position: syncEngine.liveActivityPositionSubject.value)
+        }
+        foregroundResync()
+#endif
+    }
+
+    /// Entry point for the Stop Drive Mode intent (leaving the car): stop
+    /// holding the session and take the tile down right away.
+    func stopDriveSession() {
+        driveMode = false
+#if os(iOS)
+        Task { await liveActivity.endNow() }
+#endif
+    }
+
+    static let autoDriveOnCarKey = "autoDriveModeOnCarAudio"
+
+    /// True when the current song is playing in DriveVerse's own player.
+    private var isLocalPlayback: Bool { nowPlaying?.fileStem != nil }
+
+    // MARK: Actions
+
+    func togglePlayback() {
+#if os(iOS)
+        if isLocalPlayback { PlayerController.shared.togglePlayPause() } else { appleSource.togglePlayback() }
+#endif
+    }
+
+    func skipToPreviousItem() {
+#if os(iOS)
+        if isLocalPlayback { PlayerController.shared.skipBackward() } else { appleSource.skipToPreviousItem() }
+#endif
+    }
+
+    func skipToNextItem() {
+#if os(iOS)
+        if isLocalPlayback { PlayerController.shared.skipForward() } else { appleSource.skipToNextItem() }
+#endif
+    }
+
+    func seek(toFraction fraction: Double) {
+#if os(iOS)
+        if isLocalPlayback { PlayerController.shared.seek(toFraction: fraction) } else { appleSource.seek(toFraction: fraction) }
+#endif
+    }
+
+    func seek(bySeconds offset: Double) {
+#if os(iOS)
+        if isLocalPlayback { PlayerController.shared.seek(bySeconds: offset) } else { appleSource.seek(bySeconds: offset) }
+#endif
+    }
+
+    func retryLyrics() {
+        guard lyricsEnabled, let state = nowPlaying else { return }
+        lyricsService.useAutomaticSelection(for: state, displayMode: lyricsDisplayMode)
+        currentSignature = LyricsMatcher.signature(
+            title: state.title,
+            artist: state.artist,
+            durationMs: state.durationMs,
+            album: state.album
+        )
+        fetchLyrics(for: state, forceRefresh: true)
+    }
+
+    func selectLyricsCandidate(_ choice: LyricsCandidateChoice) {
+        guard lyricsEnabled, let state = nowPlaying else { return }
+        lyricsService.select(choice, for: state, displayMode: lyricsDisplayMode)
+        selectedLyricsCandidateID = choice.id
+        isUsingManualLyrics = true
+        applyLyricsContent(choice.content)
+    }
+
+    func useAutomaticLyrics() {
+        guard lyricsEnabled, let state = nowPlaying else { return }
+        lyricsService.useAutomaticSelection(for: state, displayMode: lyricsDisplayMode)
+        fetchLyrics(for: state)
+    }
+
+    func clearLyricsCache() {
+        lyricsService.clearCache()
+        lyricsCandidates = []
+        selectedLyricsCandidateID = nil
+        isUsingManualLyrics = false
+    }
+
+    func resetLyricsTimingOffset() {
+        lyricsTimingOffsetMs = 0
+    }
+
+    // MARK: Wiring
+
+    private func wire(nowPlayingPublisher: AnyPublisher<NowPlayingState?, Never>) {
+        nowPlayingPublisher
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] state in self?.handle(state) }
+            .store(in: &cancellables)
+
+        syncEngine.positionSubject
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] position in
+                self?.position = position
+            }
+            .store(in: &cancellables)
+
+        syncEngine.liveActivityPositionSubject
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.syncLiveActivity() }
+            .store(in: &cancellables)
+
+#if os(iOS)
+        appleSource.authStatusSubject
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] in self?.appleMusicAuth = $0 }
+            .store(in: &cancellables)
+#endif
+    }
+
+    private func handle(_ state: NowPlayingState?) {
+        nowPlaying = state
+        syncEngine.apply(state)
+
+        guard let state else {
+            currentSignature = nil
+            lyricsTask?.cancel()
+            syncEngine.setLyrics([])
+            lyricsState = .idle
+            currentLyricsSource = nil
+            lyricsCandidates = []
+            selectedLyricsCandidateID = nil
+            isUsingManualLyrics = false
+            return
+        }
+
+        guard lyricsEnabled else {
+            currentSignature = nil
+            return
+        }
+
+        let signature = LyricsMatcher.signature(
+            title: state.title,
+            artist: state.artist,
+            durationMs: state.durationMs,
+            album: state.album
+        )
+        if signature != currentSignature {
+            currentSignature = signature
+            fetchLyrics(for: state)
+        }
+        syncLiveActivity()
+    }
+
+    private func refreshLyricsPresentation() {
+#if os(iOS)
+        liveActivity.forceNextUpdate()
+#endif
+        syncEngine.setDisplayOptions(lyricsDisplayOptions)
+    }
+
+    /// Live Activity line lookup includes the transition lead. Playback and
+    /// word positions still use the actual clock; unchanged ticks are deduped.
+    private func syncLiveActivity() {
+#if os(iOS)
+        guard lyricsEnabled else {
+            updateKeepAlive()
+            return
+        }
+        var hasSyncedLyrics = false
+        if case .synced = lyricsState { hasSyncedLyrics = true }
+        liveActivity.sync(state: nowPlaying,
+                          position: syncEngine.liveActivityPositionSubject.value,
+                          hasSyncedLyrics: hasSyncedLyrics)
+        updateKeepAlive()
+#endif
+    }
+
+    /// Drive Mode means "stay awake until toggled off", not only while an
+    /// activity is active — pauses of any length (parking, calls, coffee
+    /// stops) must survive
+    /// without reopening the app, because a suspended app can neither detect
+    /// the resume nor re-request the activity from the background. Battery
+    /// cost stays opt-in; the CarPlay automation (README) turns Drive Mode
+    /// off when leaving the car.
+    private func updateKeepAlive() {
+#if os(iOS)
+        let shouldRun = driveMode && lyricsEnabled
+        if shouldRun && !backgroundKeeper.isRunning {
+            do {
+                try backgroundKeeper.start()
+            } catch {
+                driveMode = false
+                errorMessage = String(localized: "Drive Mode needs location access to stay alive in the background. Allow it for DriveVerse in Settings → Privacy & Security → Location Services.")
+            }
+        } else if !shouldRun && backgroundKeeper.isRunning {
+            backgroundKeeper.stop()
+        }
+#endif
+    }
+
+    private func fetchLyrics(for state: NowPlayingState, forceRefresh: Bool = false) {
+        guard lyricsEnabled else { return }
+        lyricsTask?.cancel()
+        syncEngine.setLyrics([])
+        lyricsState = .loading
+        currentLyricsSource = nil
+        lyricsCandidates = []
+        selectedLyricsCandidateID = nil
+        isUsingManualLyrics = false
+
+        lyricsTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let result = try await self.lyricsService.lyrics(
+                    for: state,
+                    displayMode: self.lyricsDisplayMode,
+                    forceRefresh: forceRefresh
+                )
+                guard !Task.isCancelled else { return }
+                self.lyricsCandidates = self.lyricsService.lastCandidates
+                self.selectedLyricsCandidateID = self.lyricsService.selectedCandidateID
+                self.isUsingManualLyrics = self.lyricsService.isUsingManualSelection
+                self.applyLyricsContent(result)
+            } catch is CancellationError {
+                // superseded by a newer track — nothing to do
+            } catch {
+                guard !Task.isCancelled else { return }
+                self.currentLyricsSource = nil
+                self.lyricsState = .failed
+                Self.log.warning("lyrics fetch failed for \(state.title.prefix(12), privacy: .public): \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
+    private func disableLyrics() {
+        lyricsTask?.cancel()
+        lyricsTask = nil
+        currentSignature = nil
+        syncEngine.setLyrics([])
+        lyricsState = .idle
+        currentLyricsSource = nil
+        lyricsCandidates = []
+        selectedLyricsCandidateID = nil
+        isUsingManualLyrics = false
+#if os(iOS)
+        liveActivity.holdWhilePaused = false
+        Task { await liveActivity.endNow() }
+#endif
+        updateKeepAlive()
+    }
+
+    private func applyLyricsContent(_ result: LyricsContent) {
+        switch result {
+        case .document(let document):
+            currentLyricsSource = document.source
+            if document.isSynchronized {
+                lyricsState = .synced(document)
+                syncEngine.setLyrics(document.lines)
+            } else {
+                syncEngine.setLyrics([])
+                lyricsState = .plain(document)
+            }
+        case .instrumental:
+            syncEngine.setLyrics([])
+            currentLyricsSource = nil
+            lyricsState = .instrumental
+        case .notFound:
+            syncEngine.setLyrics([])
+            currentLyricsSource = nil
+            lyricsState = .notFound
+        }
+    }
+}
