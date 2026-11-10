@@ -2,6 +2,8 @@ import SwiftUI
 
 struct SettingsView: View {
     @EnvironmentObject private var model: AppModel
+    @AppStorage("autoDriveModeOnCarAudio") private var autoDriveOnCar = true
+    @AppStorage(LocalLyricsStore.onlineFallbackKey) private var onlineLyricsForOwnSongs = false
     @State private var cacheCleared = false
 
     var body: some View {
@@ -83,6 +85,15 @@ struct SettingsView: View {
                 Text("Lock Screen line lyrics")
             } footer: {
                 Text("Turn off word-by-word Live Activity to choose the original text transition or particle text. The two effects are shown separately.")
+            }
+
+            Section {
+                Toggle("Start Drive Mode in the car", isOn: $autoDriveOnCar)
+                Toggle("Look up lyrics online for my songs", isOn: $onlineLyricsForOwnSongs)
+            } header: {
+                Text("My songs")
+            } footer: {
+                Text("Drive Mode starts by itself when the iPhone connects to car audio (CarPlay) and ends when it disconnects. Songs you play in DriveVerse use only the .lrc files you added. Turn on online lookup to also search the internet for songs that have no file; for obscure songs a guess may be wrong.")
             }
 
             Section {

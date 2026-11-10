@@ -99,7 +99,7 @@ struct LyricsScreen: View {
             switch model.lyricsState {
             case .idle:
                 placeholder(symbol: "music.note", title: "Nothing playing",
-                            detail: "Start a song in Apple Music.")
+                            detail: "Play a song from your Library, or start one in Apple Music.")
             case .loading:
                 VStack(spacing: 14) {
                     ProgressView()

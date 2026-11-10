@@ -39,14 +39,18 @@ targets:
       properties:
         CFBundleDisplayName: DriveVerse
         NSSupportsLiveActivities: true
+        # Makes the Lyrics folder visible in the Files app.
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
         # Lyric lines change every few seconds — without the frequent-updates
         # budget, ActivityKit silently stops rendering updates ~30 s after
         # the app backgrounds while Activity.update keeps getting called.
         NSSupportsLiveActivitiesFrequentUpdates: true
         NSAppleMusicUsageDescription: DriveVerse reads the current Apple Music track to fetch and display synced lyrics. It never plays or modifies your music.
-        # location (not audio): iOS forbids Live Activity updates from apps
-        # whose only background reason is playing media.
-        UIBackgroundModes: [location]
+        # location keeps the lyrics tile updating (iOS forbids Live Activity
+        # updates from apps whose ONLY background reason is playing media);
+        # audio lets the built-in player keep playing with the screen off.
+        UIBackgroundModes: [location, audio]
         NSLocationWhenInUseUsageDescription: Drive Mode uses a low-power location session to stay active in the background so lyrics keep updating on CarPlay and the lock screen. Positions are discarded immediately and never leave the device.
         NSLocationAlwaysAndWhenInUseUsageDescription: Allowing "Always" lets the CarPlay automation start Drive Mode automatically when you get in the car. Positions are discarded immediately and never leave the device.
         UILaunchScreen: {}

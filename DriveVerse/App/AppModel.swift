@@ -210,7 +210,31 @@ final class AppModel: ObservableObject {
         syncEngine.setDisplayOptions(lyricsDisplayOptions)
         syncEngine.setOffsetMs(lyricsTimingOffsetMs)
         syncEngine.setLiveActivityLineLeadMs(liveActivityLineLeadMs)
+#if os(iOS)
+        // DriveVerse's own player wins unless it is paused while Apple Music
+        // is playing something else.
+        let combined = Publishers.CombineLatest(
+            applePublisher.prepend(Optional<NowPlayingState>.none),
+            PlayerController.shared.statePublisher
+        )
+        .map { apple, mine -> NowPlayingState? in
+            guard let mine else { return apple }
+            if !mine.isPlaying, apple?.isPlaying == true { return apple }
+            return mine
+        }
+        .eraseToAnyPublisher()
+        wire(nowPlayingPublisher: combined)
+
+        // Joining a car (CarPlay) audio route starts Drive Mode so the lyrics
+        // tile appears on its own; leaving the car ends it.
+        PlayerController.shared.onCarAudioChange = { [weak self] connected in
+            let enabled = UserDefaults.standard.object(forKey: Self.autoDriveOnCarKey) as? Bool ?? true
+            guard enabled else { return }
+            if connected { self?.startDriveSession() } else { self?.stopDriveSession() }
+        }
+#else
         wire(nowPlayingPublisher: applePublisher)
+#endif
 
 #if os(iOS)
         liveActivity.wordUpdatesEnabled = liveActivityWordUpdatesEnabled
@@ -271,35 +295,40 @@ final class AppModel: ObservableObject {
 #endif
     }
 
+    static let autoDriveOnCarKey = "autoDriveModeOnCarAudio"
+
+    /// True when the current song is playing in DriveVerse's own player.
+    private var isLocalPlayback: Bool { nowPlaying?.fileStem != nil }
+
     // MARK: Actions
 
     func togglePlayback() {
 #if os(iOS)
-        appleSource.togglePlayback()
+        if isLocalPlayback { PlayerController.shared.togglePlayPause() } else { appleSource.togglePlayback() }
 #endif
     }
 
     func skipToPreviousItem() {
 #if os(iOS)
-        appleSource.skipToPreviousItem()
+        if isLocalPlayback { PlayerController.shared.skipBackward() } else { appleSource.skipToPreviousItem() }
 #endif
     }
 
     func skipToNextItem() {
 #if os(iOS)
-        appleSource.skipToNextItem()
+        if isLocalPlayback { PlayerController.shared.skipForward() } else { appleSource.skipToNextItem() }
 #endif
     }
 
     func seek(toFraction fraction: Double) {
 #if os(iOS)
-        appleSource.seek(toFraction: fraction)
+        if isLocalPlayback { PlayerController.shared.seek(toFraction: fraction) } else { appleSource.seek(toFraction: fraction) }
 #endif
     }
 
     func seek(bySeconds offset: Double) {
 #if os(iOS)
-        appleSource.seek(bySeconds: offset)
+        if isLocalPlayback { PlayerController.shared.seek(bySeconds: offset) } else { appleSource.seek(bySeconds: offset) }
 #endif
     }
 

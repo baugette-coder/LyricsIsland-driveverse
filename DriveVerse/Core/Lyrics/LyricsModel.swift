@@ -4,12 +4,14 @@ enum LyricsSource: String, Codable, Equatable, Hashable {
     case kugou
     case netease
     case lrclib
+    case local
 
     var title: LocalizedStringResource {
         switch self {
         case .kugou: return "Kugou Music"
         case .netease: return "NetEase Cloud Music"
         case .lrclib: return "LRCLIB"
+        case .local: return "My lyrics files"
         }
     }
 }

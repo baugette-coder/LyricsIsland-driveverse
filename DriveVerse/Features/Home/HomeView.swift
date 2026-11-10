@@ -9,6 +9,11 @@ struct HomeView: View {
             ScrollView {
                 VStack(spacing: 16) {
                     NowPlayingCard()
+#if os(iOS)
+                    if model.nowPlaying?.fileStem != nil {
+                        PlayerExtrasCard()
+                    }
+#endif
                     LyricPreviewCard { showsLyrics = true }
                     DriveModeCard()
                     if model.appleMusicAuth == .denied {
@@ -75,7 +80,7 @@ private struct NowPlayingCard: View {
             } else {
                 Label("Nothing playing", systemImage: "music.note")
                     .foregroundStyle(.secondary)
-                Text("Start a song in Apple Music — DriveVerse picks it up automatically.")
+                Text("Play a song from the Library tab, or start one in Apple Music — DriveVerse picks it up automatically.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }

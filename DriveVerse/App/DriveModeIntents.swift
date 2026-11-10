@@ -48,6 +48,45 @@ struct DriveVerseShortcuts: AppShortcutsProvider {
             shortTitle: "Stop Drive Mode",
             systemImageName: "car"
         )
+        AppShortcut(
+            intent: ShuffleAllIntent(),
+            phrases: [
+                "Shuffle my music in \(.applicationName)",
+                "Shuffle all in \(.applicationName)",
+            ],
+            shortTitle: "Shuffle My Music",
+            systemImageName: "shuffle"
+        )
+        AppShortcut(
+            intent: PlayFavoritesIntent(),
+            phrases: ["Play my favorites in \(.applicationName)"],
+            shortTitle: "Play Favorites",
+            systemImageName: "heart.fill"
+        )
+        AppShortcut(
+            intent: PlayPlaylistIntent(),
+            phrases: ["Play playlist \(\.$playlist) in \(.applicationName)"],
+            shortTitle: "Play Playlist",
+            systemImageName: "music.note.list"
+        )
+        AppShortcut(
+            intent: PlayAlbumIntent(),
+            phrases: ["Play album \(\.$album) in \(.applicationName)"],
+            shortTitle: "Play Album",
+            systemImageName: "square.stack"
+        )
+        AppShortcut(
+            intent: PlayArtistIntent(),
+            phrases: ["Play artist \(\.$artist) in \(.applicationName)"],
+            shortTitle: "Play Artist",
+            systemImageName: "person.wave.2"
+        )
+        AppShortcut(
+            intent: PlaySongIntent(),
+            phrases: ["Play song \(\.$song) in \(.applicationName)"],
+            shortTitle: "Play Song",
+            systemImageName: "music.note"
+        )
     }
 }
 #endif

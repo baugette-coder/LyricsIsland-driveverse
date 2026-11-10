@@ -14,6 +14,11 @@ struct NowPlayingState: Equatable {
     let isPlaying: Bool
     /// When `positionMs` was observed — the sync engine extrapolates from here.
     let capturedAt: Date
+    /// Set only for tracks played by DriveVerse's own player: the audio file
+    /// name without extension. Lets a same-named .lrc file match exactly.
+    let fileStem: String?
+    /// Folder of that audio file, relative to the library root ("" = top level).
+    let fileFolder: String?
 
     init(
         title: String,
@@ -24,7 +29,9 @@ struct NowPlayingState: Equatable {
         durationMs: Int?,
         positionMs: Int,
         isPlaying: Bool,
-        capturedAt: Date
+        capturedAt: Date,
+        fileStem: String? = nil,
+        fileFolder: String? = nil
     ) {
         self.title = title
         self.artist = artist
@@ -35,6 +42,8 @@ struct NowPlayingState: Equatable {
         self.positionMs = positionMs
         self.isPlaying = isPlaying
         self.capturedAt = capturedAt
+        self.fileStem = fileStem
+        self.fileFolder = fileFolder
     }
 
     func with(isPlaying: Bool) -> NowPlayingState {
@@ -42,7 +51,8 @@ struct NowPlayingState: Equatable {
             title: title, artist: artist, album: album, artworkData: artworkData,
             displayArtworkData: displayArtworkData,
             durationMs: durationMs, positionMs: positionMs,
-            isPlaying: isPlaying, capturedAt: capturedAt
+            isPlaying: isPlaying, capturedAt: capturedAt,
+            fileStem: fileStem, fileFolder: fileFolder
         )
     }
 

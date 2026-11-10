@@ -34,6 +34,31 @@ final class LyricsService {
         displayMode: LyricsDisplayMode = .originalAndTranslation,
         forceRefresh: Bool = false
     ) async throws -> LyricsContent {
+        // Hand-made .lrc files always win and are never cached, so edits to a
+        // file show up the next time the song plays.
+        if let local = LocalLyricsStore.lyrics(
+            title: state.title,
+            artist: state.artist,
+            fileStem: state.fileStem,
+            audioFolder: state.fileFolder ?? ""
+        ) {
+            lastAttempts = []
+            lastCandidates = []
+            selectedCandidateID = nil
+            isUsingManualSelection = false
+            return local
+        }
+        // Songs played by DriveVerse's own player are offline by default: no
+        // file means no lyrics, instead of a guess from the internet. The
+        // switch in Settings brings the online lookup back.
+        if state.fileStem != nil,
+           !UserDefaults.standard.bool(forKey: LocalLyricsStore.onlineFallbackKey) {
+            lastAttempts = []
+            lastCandidates = []
+            selectedCandidateID = nil
+            isUsingManualSelection = false
+            return .notFound
+        }
         let trackSignature = LyricsMatcher.signature(
             title: state.title,
             artist: state.artist,
