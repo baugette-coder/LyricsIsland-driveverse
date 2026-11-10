@@ -39,25 +39,23 @@ enum ImportPlanner {
             var isDirectory: ObjCBool = false
             guard fm.fileExists(atPath: source.path, isDirectory: &isDirectory) else { continue }
             if isDirectory.boolValue {
-                let base = source.resolvingSymlinksInPath()
-                let basePath = base.path
                 let folderName = source.lastPathComponent
-                guard let walker = fm.enumerator(
-                    at: base,
-                    includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
-                    options: [.skipsHiddenFiles]
-                ) else { continue }
-                for case let url as URL in walker {
-                    guard url.path.hasPrefix(basePath + "/"),
-                          let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
-                          values.isRegularFile == true else { continue }
-                    let relative = String(url.path.dropFirst(basePath.count + 1))
-                    let ext = url.pathExtension
+                guard let walker = fm.enumerator(atPath: source.path) else { continue }
+                while let relative = walker.nextObject() as? String {
+                    let parts = relative.split(separator: "/").map(String.init)
+                    guard let name = parts.last else { continue }
+                    if parts.contains(where: { $0.hasPrefix(".") }) {
+                        walker.skipDescendants()
+                        continue
+                    }
+                    guard let attributes = try? fm.attributesOfItem(atPath: source.path + "/" + relative),
+                          (attributes[.type] as? FileAttributeType) == .typeRegular else { continue }
+                    let ext = TextKey.fileExtension(name)
                     if isWanted(ext) {
                         items.append(ImportItem(
-                            source: url,
+                            source: source.appendingPathComponent(relative),
                             destination: folderName + "/" + relative,
-                            size: Int64(values.fileSize ?? 0)
+                            size: (attributes[.size] as? NSNumber)?.int64Value ?? 0
                         ))
                     } else if AudioFormats.isUnsupported(ext) {
                         unsupported.append(folderName + "/" + relative)

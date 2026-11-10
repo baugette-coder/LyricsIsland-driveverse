@@ -74,18 +74,18 @@ enum LocalLyricsStore {
         let wantedFile = fileStem.map(normalize) ?? ""
         guard !wantedTitle.isEmpty || !wantedFile.isEmpty else { return nil }
         let who = normalize(artist)
-        let base = root.resolvingSymlinksInPath()
-        let basePath = base.path
-
-        guard let walker = FileManager.default.enumerator(
-            at: base,
-            includingPropertiesForKeys: [.isRegularFileKey],
-            options: [.skipsHiddenFiles]
-        ) else { return nil }
+        guard let walker = FileManager.default.enumerator(atPath: root.path) else { return nil }
 
         var best: (score: Int, sameFolder: Bool, length: Int, url: URL)?
-        for case let url as URL in walker where url.pathExtension.lowercased() == "lrc" {
-            let stem = normalize(TextKey.deletingExtension(url.lastPathComponent))
+        while let relative = walker.nextObject() as? String {
+            let parts = relative.split(separator: "/").map(String.init)
+            guard let name = parts.last else { continue }
+            if parts.contains(where: { $0.hasPrefix(".") }) {
+                walker.skipDescendants()
+                continue
+            }
+            guard TextKey.fileExtension(name) == "lrc" else { continue }
+            let stem = normalize(TextKey.deletingExtension(name))
             guard !stem.isEmpty else { continue }
 
             var score = 0
@@ -102,10 +102,9 @@ enum LocalLyricsStore {
             }
             guard score > 0 else { continue }
 
-            let parent = url.deletingLastPathComponent().path
-            let relativeParent = parent.hasPrefix(basePath + "/") ? String(parent.dropFirst(basePath.count + 1)) : ""
-            let sameFolder = relativeParent == audioFolder
-            let candidate = (score, sameFolder, stem.count, url)
+            let relativeParent = parts.dropLast().joined(separator: "/")
+            let candidate = (score, relativeParent == audioFolder, stem.count,
+                             root.appendingPathComponent(relative))
             if let current = best, !isBetter(candidate, than: current) { continue }
             best = candidate
         }

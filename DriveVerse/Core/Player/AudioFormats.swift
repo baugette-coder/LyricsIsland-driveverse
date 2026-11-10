@@ -38,34 +38,30 @@ struct ScanResult: Equatable {
 enum MediaFileScanner {
     /// Walks `root` recursively. Hidden files and the app's own bookkeeping
     /// folders are skipped. Cheap: reads file attributes only, never contents.
+    /// Works with relative paths handed out by FileManager, so it does not
+    /// matter how the system spells the root (/var vs /private/var).
     static func scan(root: URL, skippingTopLevel skipped: Set<String> = []) -> ScanResult {
         let fm = FileManager.default
-        let base = root.resolvingSymlinksInPath()
-        let basePath = base.path
-        guard let walker = fm.enumerator(
-            at: base,
-            includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey],
-            options: [.skipsHiddenFiles]
-        ) else { return ScanResult() }
+        let rootPath = root.path
+        guard let walker = fm.enumerator(atPath: rootPath) else { return ScanResult() }
 
         var result = ScanResult()
-        for case let url as URL in walker {
-            let full = url.path
-            guard full.hasPrefix(basePath + "/") else { continue }
-            let relative = String(full.dropFirst(basePath.count + 1))
-            if let top = relative.split(separator: "/").first, skipped.contains(String(top)) {
+        while let relative = walker.nextObject() as? String {
+            let parts = relative.split(separator: "/").map(String.init)
+            guard let name = parts.last else { continue }
+            if parts.contains(where: { $0.hasPrefix(".") })
+                || (parts.first.map { skipped.contains($0) } ?? false) {
                 walker.skipDescendants()
                 continue
             }
-            guard let values = try? url.resourceValues(forKeys: [
-                .isRegularFileKey, .fileSizeKey, .contentModificationDateKey,
-            ]), values.isRegularFile == true else { continue }
+            guard let attributes = try? fm.attributesOfItem(atPath: rootPath + "/" + relative),
+                  (attributes[.type] as? FileAttributeType) == .typeRegular else { continue }
             let file = ScannedFile(
                 path: relative,
-                size: Int64(values.fileSize ?? 0),
-                modified: values.contentModificationDate ?? .distantPast
+                size: (attributes[.size] as? NSNumber)?.int64Value ?? 0,
+                modified: (attributes[.modificationDate] as? Date) ?? .distantPast
             )
-            let ext = url.pathExtension
+            let ext = TextKey.fileExtension(name)
             if AudioFormats.isPlayable(ext) {
                 result.audio.append(file)
             } else if AudioFormats.isLyrics(ext) {

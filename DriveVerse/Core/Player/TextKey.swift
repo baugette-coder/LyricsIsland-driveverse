@@ -32,4 +32,16 @@ enum TextKey {
         if order != .orderedSame { return order == .orderedAscending }
         return a < b
     }
+
+    /// One spelling for a path. macOS can report the same folder as /var/x or
+    /// /private/var/x; normalising both sides keeps "relative path" maths exact.
+    static func canonicalPath(_ url: URL) -> String {
+        url.resolvingSymlinksInPath().standardizedFileURL.path
+    }
+
+    /// Lowercased extension without the dot ("Song.M4A" -> "m4a"), "" if none.
+    static func fileExtension(_ name: String) -> String {
+        guard let dot = name.lastIndex(of: "."), dot != name.startIndex else { return "" }
+        return String(name[name.index(after: dot)...]).lowercased()
+    }
 }
